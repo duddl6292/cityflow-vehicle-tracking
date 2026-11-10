@@ -4,6 +4,7 @@
 박스 매칭률, ID 변경, 미연결 후 재연결 구간을 집계한다.
 """
 
+import json
 import argparse
 import csv
 from collections import defaultdict
@@ -149,15 +150,30 @@ def evaluate(gt_frames, track_frames, min_iou):
             last_matched_frame = frame_id
             last_track_id = track_id
 
-    return matched_boxes, id_changes, reconnections
+    return (matched_boxes, id_changes, reconnections), histories
 
 
 def main():
     parser = argparse.ArgumentParser(description="GT 박스를 기준으로 두 추적 결과를 비교합니다.")
-    parser.add_argument("--gt", required=True, type=Path, help="카메라의 gt.txt 경로")
-    parser.add_argument("--high-only", required=True, type=Path, help="1차 매칭 결과 CSV 경로")
-    parser.add_argument("--two-stage", required=True, type=Path, help="2차 매칭 결과 CSV 경로")
-    parser.add_argument("--min-iou", type=float, default=0.5, help="평가용 IoU 하한 (기본값 0.5)")
+    parser.add_argument("--gt", 
+                        required=True, 
+                        type=Path, 
+                        help="카메라의 gt.txt 경로")
+    parser.add_argument("--high-only", 
+                        required=True, 
+                        type=Path, 
+                        help="1차 매칭 결과 CSV 경로")
+    parser.add_argument("--two-stage", 
+                        required=True, 
+                        type=Path, 
+                        help="2차 매칭 결과 CSV 경로")
+    parser.add_argument("--min-iou", 
+                        type=float, 
+                        default=0.5, 
+                        help="평가용 IoU 하한 (기본값 0.5)")
+    parser.add_argument("--output-dir", 
+                        type=Path, 
+                        help="평가 결과를 JSON으로 저장할 폴더")
     args = parser.parse_args()
 
     if not 0 < args.min_iou <= 1:
@@ -165,8 +181,12 @@ def main():
 
     try:
         gt_frames = load_gt(args.gt)
-        high = evaluate(gt_frames, load_tracks(args.high_only), args.min_iou)
-        two = evaluate(gt_frames, load_tracks(args.two_stage), args.min_iou)
+        high, high_histories = evaluate(
+            gt_frames, load_tracks(args.high_only), args.min_iou
+        )
+        two, two_histories = evaluate(
+            gt_frames, load_tracks(args.two_stage), args.min_iou
+        )
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
@@ -183,7 +203,57 @@ def main():
     print(f"| ID 변경 | {high[1]} | {two[1]} |")
     print(f"| 미연결 후 재연결 구간 | {high[2]} | {two[2]} |")
     print(f"\nGT 박스 매칭률 변화 {two_rate - high_rate:+.2f}%p")
+    if args.output_dir is not None:
+        metrics = {
+            "evaluation_min_iou": args.min_iou,
+            "gt_vehicle_count": vehicle_count,
+            "gt_box_count": gt_count,
+        }
 
+        # evaluate()가 반환한 세 값을 풀어서 의미가 드러나는 이름으로 저장합니다.
+        for name, result, rate in (
+            ("high_only", high, high_rate),
+            ("two_stage", two, two_rate),
+        ):
+            matched_boxes, id_changes, reconnections = result
 
+            metrics[name] = {
+                "matched_gt_boxes": matched_boxes,
+                "gt_match_rate_percent": round(rate, 2),
+                "id_changes": id_changes,
+                "reconnections": reconnections,
+            }
+
+        # 상위 폴더까지 만들고, 폴더가 이미 있어도 그대로 사용합니다.
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = args.output_dir / "metrics.json"
+
+        with output_path.open("w", encoding="utf-8") as file:
+            json.dump(metrics, file, indent=2)
+
+        print(f"\n평가 결과 저장: {output_path.resolve()}")
+        # 2차 결과에서 (프레임 번호, GT 차량 ID)로 추적 ID를 찾을 수 있게 합니다.
+        two_by_observation = {
+            (frame_id, gt_id): track_id
+            for gt_id, history in two_histories.items()
+            for frame_id, track_id in history
+        }
+
+        events_path = args.output_dir / "case_events.jsonl"
+        with events_path.open("w", encoding="utf-8") as file:
+            for gt_id, history in high_histories.items():
+                for frame_id, high_id in history:
+                    two_id = two_by_observation[(frame_id, gt_id)]
+
+                    # 한 줄이 특정 프레임에서 관측된 GT 차량 한 대의 비교 기록입니다.
+                    event = {
+                        "frame_id": frame_id,
+                        "gt_id": gt_id,
+                        "high_only_track_id": high_id,
+                        "two_stage_track_id": two_id,
+                    }
+                    file.write(json.dumps(event) + "\n")
+
+        print(f"프레임별 비교 저장: {events_path.resolve()}")
 if __name__ == "__main__":
     main()
