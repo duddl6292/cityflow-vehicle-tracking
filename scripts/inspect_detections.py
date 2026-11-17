@@ -621,6 +621,13 @@ def main():
         help="확인할 프레임 번호",
     )
 
+    parser.add_argument(
+        "--tracker",
+        choices=("high-only", "two-stage"),
+        default="two-stage",
+        help="비교할 추적 방식",
+    )
+
     args = parser.parse_args()
 
     if args.frame_id < 1:
@@ -661,15 +668,20 @@ def main():
     # 탐지가 없는 프레임도 처리하기 위해 전체 프레임 수를 사용합니다.
     total_frames = run_info["processed_frames"]
 
-    # 기존 HighConfidenceTracker 대신 사용합니다.
-    tracker = TwoStageTracker(
+    if args.tracker == "high-only":
+        tracker_class = HighConfidenceTracker
+        filename = "tracks_high_only.csv"
+    else:
+        tracker_class = TwoStageTracker
+        filename = "tracks_two_stage.csv"
+
+    tracker = tracker_class(
         high_threshold=0.6,
         min_iou=0.3,
         max_missed=20,
     )
 
-    # 기존 기준 결과를 보존하도록 다른 이름으로 저장합니다.
-    output_path = args.detections_csv.parent / "tracks_two_stage.csv"
+    output_path = args.detections_csv.parent / filename
 
     saved_rows = 0
 
